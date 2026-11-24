@@ -6,6 +6,7 @@ public struct BallPhysicsParams
 {
     public float gravity;          // m/s^2, positive, already scaled
     public float magnus;           // acceleration per (spin * speed)
+    public float drag;             // quadratic air drag: a = -drag * |v| * v
     public float maxSpin;
     public float spinDecay;        // spin units lost per second in flight
     public float bounceEfficiency;
@@ -30,7 +31,7 @@ public static class BallPhysics
     {
         Vector3 a = new Vector3(0f, -p.gravity, 0f);
         if (vel.sqrMagnitude > 1f) a += p.magnus * Vector3.Cross(spin, vel);
-        return a;
+        return a - p.drag * vel.magnitude * vel;
     }
 
     public static Vector3 DecaySpin(in BallPhysicsParams p, Vector3 vel, Vector3 spin, float dt)
@@ -78,10 +79,8 @@ public static class BallPhysics
         return vel;
     }
 
-    // Launch velocity that peaks near apexY and lands at target (ball resting on the table),
-    // accounting for the Magnus dip/float and sideways curve of the given spin.
-    // An analytic guess is refined by simulating the real integrator and shifting the aim point,
-    // so the ball lands where the shot intended. If the shot would exceed maxSpeed the arc is lifted.
+    // Analytic guess with Magnus, then corrected by simulating the real integrator, so the ball lands on target.
+    // Shots faster than maxSpeed get a higher arc instead.
     public static Vector3 SolveLaunch(in BallPhysicsParams p, Vector3 start, Vector3 target, float apexY, ref Vector3 spin, float dt)
     {
         Vector3 v = SolveAnalytic(p, start, target, apexY, ref spin);

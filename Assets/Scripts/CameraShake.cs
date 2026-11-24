@@ -4,23 +4,29 @@ public class CameraShake : MonoBehaviour
 {
     public static CameraShake Instance { get; private set; }
 
-    [Header("Dynamic Paddle Tracking & Angling")]
+    [Header("Paddle Follow")]
     [SerializeField] private Transform targetPaddle;
     [SerializeField] private float followSharpness = 4.5f;
     [SerializeField] private float lateralTrackRatio = 0.38f;
     [SerializeField] private float maxCamYaw = 4.5f;
     [SerializeField] private float maxCamRoll = 1.2f;
 
-    [Header("Subtle Impact Feedback")]
+    [Header("Impact")]
     [SerializeField] private float maxTranslationShake = 0.035f;
     [SerializeField] private float decayRate = 4.5f;
     [SerializeField] private float noiseFrequency = 22f;
+    [Tooltip("Degrees the FOV narrows on a kill shot before springing back.")]
+    [SerializeField] private float fovPunch = 4f;
+    [SerializeField] private float fovRecovery = 6f;
 
     private float trauma = 0f;
     private Vector3 initialBasePos;
     private Quaternion initialBaseRot;
     private Vector3 currentFollowOffset = Vector3.zero;
     private Quaternion currentFollowRot = Quaternion.identity;
+    private Camera cam;
+    private float baseFov;
+    private float fovOffset;
 
     private void Awake()
     {
@@ -32,6 +38,9 @@ public class CameraShake : MonoBehaviour
         transform.position = initialBasePos;
         transform.rotation = initialBaseRot;
         currentFollowRot = initialBaseRot;
+
+        cam = GetComponentInChildren<Camera>();
+        if (cam != null) baseFov = cam.fieldOfView;
     }
 
     public void SetTargetPaddle(Transform paddle)
@@ -41,12 +50,18 @@ public class CameraShake : MonoBehaviour
 
     public void AddTrauma(float amount)
     {
+        if (GameSettings.ReduceMotion) return;
         trauma = Mathf.Clamp01(trauma + amount * 0.35f);
+    }
+
+    public void PunchFov()
+    {
+        if (GameSettings.ReduceMotion) return;
+        fovOffset = -fovPunch;
     }
 
     private void LateUpdate()
     {
-        // 1. Dynamic lateral movement and angled yaw/roll tracking paddle
         Vector3 desiredOffset = Vector3.zero;
         Quaternion desiredRot = initialBaseRot;
 
@@ -59,28 +74,30 @@ public class CameraShake : MonoBehaviour
             desiredRot = Quaternion.Euler(20f, normX * maxCamYaw, -normX * maxCamRoll);
         }
 
-        // ponytail: dynamic framing tracks lateral paddle travel and angle; upgrade to multi-camera TV broadcast view if spectator mode added.
         float dt = Time.deltaTime;
         currentFollowOffset = Vector3.Lerp(currentFollowOffset, desiredOffset, followSharpness * dt);
         currentFollowRot = Quaternion.Slerp(currentFollowRot, desiredRot, followSharpness * dt);
 
-        Vector3 camPos = initialBasePos + currentFollowOffset;
-
-        // 2. Subtle impact trauma
         Vector3 shakeOffset = Vector3.zero;
         if (trauma > 0f)
         {
             float shakePower = trauma * trauma;
             float time = Time.time * noiseFrequency;
-
-            float offsetX = (Mathf.PerlinNoise(time, 0f) * 2f - 1f) * maxTranslationShake * shakePower;
-            float offsetY = (Mathf.PerlinNoise(0f, time) * 2f - 1f) * maxTranslationShake * shakePower;
-
-            shakeOffset = new Vector3(offsetX, offsetY, 0f);
+            shakeOffset = new Vector3(
+                (Mathf.PerlinNoise(time, 0f) * 2f - 1f) * maxTranslationShake * shakePower,
+                (Mathf.PerlinNoise(0f, time) * 2f - 1f) * maxTranslationShake * shakePower,
+                0f);
             trauma = Mathf.Max(0f, trauma - decayRate * dt);
         }
 
-        transform.position = camPos + shakeOffset;
+        // Unscaled so the punch still recovers while a slow-motion moment is playing.
+        if (cam != null)
+        {
+            fovOffset = Mathf.Lerp(fovOffset, 0f, 1f - Mathf.Exp(-fovRecovery * Time.unscaledDeltaTime));
+            cam.fieldOfView = baseFov + fovOffset;
+        }
+
+        transform.position = initialBasePos + currentFollowOffset + shakeOffset;
         transform.rotation = currentFollowRot;
     }
 }

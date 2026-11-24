@@ -17,6 +17,8 @@ public class BallController : MonoBehaviour
     [SerializeField] private float magnusStrength = 0.018f;
     [SerializeField] private float maxSpin = 18f;
     [SerializeField] private float spinDecayPerSecond = 3.0f;
+    [Tooltip("Quadratic air drag. 0.012 lets a smash leave near 18 m/s and arrive near 15.")]
+    [SerializeField] private float airDrag = 0.012f;
     [Tooltip("Lateral m/s added off the table at full sidespin.")]
     [SerializeField] private float bounceSideKick = 1.3f;
 
@@ -31,18 +33,23 @@ public class BallController : MonoBehaviour
     [Tooltip("Rally length at which shots reach their flattest, fastest arcs.")]
     [SerializeField] private int rallyForFullHeat = 12;
 
-    [Header("4. Reach")]
+    [Header("4. Moments")]
+    [Tooltip("Bounce this close to a table edge (m) skids low and kicks outward.")]
+    [SerializeField] private float edgeBand = 0.12f;
+    [Tooltip("Ball centre this far above the net cord (m) still pops over after clipping it.")]
+    [SerializeField] private float cordPopHeight = 0.04f;
+
+    [Header("5. Reach")]
     [SerializeField] private float playerReach = 1.15f;
     [SerializeField] private float aiReach = 0.80f;
 
-    [Header("5. Serve Setup")]
+    [Header("6. Serve Setup")]
     [SerializeField] private Vector3 servePaddleOffset = new Vector3(0.20f, 0.22f, 0.60f);
 
-    [Header("6. References")]
+    [Header("7. References")]
     [SerializeField] private Transform playerTransform;
     [SerializeField] private Transform aiTransform;
     [SerializeField] private BallVisualFX visualFX;
-    [SerializeField] private ParticleSystem impactSparks;
 
     private Rigidbody rb;
     private PlayerPaddleController playerCtrl;
@@ -52,16 +59,16 @@ public class BallController : MonoBehaviour
     private Vector3 hoverOrigin;
     private float lastHitTime = -1f;
     private float stuckTimer = 0f;
+    private float simDt = 0.02f;
 
     private Vector3 ballSpin = Vector3.zero;
 
-    // Procedural Audio (Zero external asset dependencies)
+    // Tones are generated at runtime, so there are no audio assets.
     private AudioSource audioSource;
     private AudioClip paddleHitSound;
     private AudioClip tableBounceSound;
     private AudioClip netHitSound;
 
-    // Rules & Scoring State
     private Hitter lastHitter = Hitter.None;
     private bool isServeShot = false;
     private int bouncesOnPlayerSide = 0;
@@ -74,11 +81,13 @@ public class BallController : MonoBehaviour
     public Hitter LastHitter => lastHitter;
     public int ShotId { get; private set; }
     public float SpinAmount01 => Mathf.Clamp01(ballSpin.magnitude / maxSpin);
+    public float Heat01 => RallyHeat();
 
     public BallPhysicsParams PhysicsParams => new BallPhysicsParams
     {
         gravity = Mathf.Abs(Physics.gravity.y) * gravityScale,
         magnus = magnusStrength,
+        drag = airDrag,
         maxSpin = maxSpin,
         spinDecay = spinDecayPerSecond,
         bounceEfficiency = tableBounceEfficiency,
@@ -93,6 +102,9 @@ public class BallController : MonoBehaviour
         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
         rb.useGravity = false;
         rb.constraints = RigidbodyConstraints.FreezeRotation;
+        rb.interpolation = RigidbodyInterpolation.Interpolate;
+        // Captured before any slow motion shrinks fixedDeltaTime, so predictions use one step size.
+        simDt = Time.fixedDeltaTime;
 
         if (playerTransform != null) playerCtrl = playerTransform.GetComponent<PlayerPaddleController>();
         if (aiTransform != null) aiCtrl = aiTransform.GetComponent<AIPaddleController>();
@@ -137,7 +149,11 @@ public class BallController : MonoBehaviour
 
     private void Update()
     {
-        if (visualFX != null) visualFX.UpdateVelocityFX(rb.linearVelocity.magnitude, maxSpeed);
+        if (visualFX != null)
+        {
+            visualFX.UpdateVelocityFX(rb.linearVelocity.magnitude, maxSpeed);
+            visualFX.SetHeat(inPlay ? RallyHeat() : 0f);
+        }
 
         // Visible rotation follows the real spin axis so topspin, chop and curve read differently.
         if (inPlay && ballSpin.sqrMagnitude > 0.25f)
@@ -145,7 +161,6 @@ public class BallController : MonoBehaviour
             transform.Rotate(ballSpin.normalized, ballSpin.magnitude * 20f * Time.deltaTime, Space.World);
         }
 
-        // 1. Player Serve Handling: Click, Tap, Space, or Forward Swing
         if (isAwaitingPlayerServe)
         {
             Vector3 anchorPos = (playerTransform != null) ? (playerTransform.position + servePaddleOffset) : hoverOrigin;
@@ -153,10 +168,12 @@ public class BallController : MonoBehaviour
             transform.position = anchorPos + new Vector3(0f, hoverY, 0f);
             rb.linearVelocity = Vector3.zero;
 
-            bool strokeActive = playerCtrl != null && (playerCtrl.IsStrokingForward || playerCtrl.CurrentVelocity.z > 0.8f);
-            bool tapped = Input.GetMouseButtonDown(0)
-                       || (Input.touchCount > 0 && Input.GetTouch(0).phase == TouchPhase.Began)
-                       || Input.GetKeyDown(KeyCode.Space);
+            bool strokeActive = playerCtrl != null && playerCtrl.IsStrokingForward;
+            bool pointerDown = Input.GetMouseButtonDown(0)
+                            || (Input.touchCount > 0 && Input.GetTouch(0).phase == TouchPhase.Began);
+            Vector2 pointer = Input.touchCount > 0 ? Input.GetTouch(0).position : (Vector2)Input.mousePosition;
+            bool onHud = GameManager.Instance != null && GameManager.Instance.IsHudTap(pointer);
+            bool tapped = (pointerDown && !onHud) || Input.GetKeyDown(KeyCode.Space);
 
             if (strokeActive || tapped)
             {
@@ -165,7 +182,7 @@ public class BallController : MonoBehaviour
             return;
         }
 
-        // 2. Proximity Hit Sweep (Eliminates frame tunneling on fast returns, aligned close to paddle)
+        // Proximity sweep catches fast balls that would tunnel past the paddle collider in one frame.
         if (inPlay && Time.time - lastHitTime > 0.12f)
         {
             Vector3 bPos = transform.position;
@@ -194,7 +211,6 @@ public class BallController : MonoBehaviour
             }
         }
 
-        // 3. Dead ball & Out-of-bounds Safeguards
         if (inPlay && GameManager.Instance != null && GameManager.Instance.State == GameManager.GameState.Play)
         {
             if (rb.linearVelocity.magnitude < 0.85f)
@@ -258,7 +274,6 @@ public class BallController : MonoBehaviour
         float forwardSpeed = Mathf.Max(0f, paddleVel.z);
         float speedFactor = Mathf.Clamp01(forwardSpeed / 5.0f);
 
-        // Visual contact alignment: snap flush to front rubber face
         if (playerTransform != null)
         {
             Vector3 pPos = playerTransform.position;
@@ -277,7 +292,7 @@ public class BallController : MonoBehaviour
         // Sideways swipe on the serve = sidespin serve that kicks off the opponent's half.
         float side = Mathf.Clamp(swipe.x / 2.0f, -1f, 1f);
         ballSpin = new Vector3(Mathf.Lerp(5f, 12f, speedFactor), side * maxSpin * 0.6f, 0f);
-        if (visualFX != null) visualFX.SetSpinTint(Mathf.Lerp(0.3f, 0.7f, speedFactor), side);
+        if (visualFX != null) visualFX.SetSpinTint(Mathf.Lerp(0.3f, 0.7f, speedFactor));
 
         TriggerImpactFeedback(transform.position, Vector3.back, Mathf.Lerp(0.04f, 0.12f, speedFactor));
         PlayHit(Mathf.Lerp(0.95f, 1.20f, speedFactor));
@@ -303,7 +318,7 @@ public class BallController : MonoBehaviour
         float skill = aiCtrl != null ? aiCtrl.Skill : 0.5f;
         float side = Random.value < skill * 0.7f ? Random.Range(-1f, 1f) : 0f;
         ballSpin = new Vector3(-6f, side * maxSpin * 0.6f, 0f);
-        if (visualFX != null) visualFX.SetSpinTint(0.35f, side);
+        if (visualFX != null) visualFX.SetSpinTint(0.35f);
 
         TriggerImpactFeedback(startPos, Vector3.forward, 0.05f);
         PlayHit(1.0f);
@@ -371,17 +386,36 @@ public class BallController : MonoBehaviour
         }
     }
 
+    // The net is a trigger, so the cord outcome is decided from how high the ball meets it:
+    // clipped on its underside it pops up and dribbles over, hit lower it dies on the hitter's side.
     private void HandleNetTouch(Vector3 hitPoint)
     {
+        if (netTouchedOnCurrentShot) return;
         netTouchedOnCurrentShot = true;
-        Vector3 vel = rb.linearVelocity;
-        // Glide over the net cord rather than dead-stopping
-        vel.z = Mathf.Sign(vel.z) * Mathf.Max(Mathf.Abs(vel.z) * 0.85f, 4.5f);
-        vel.y = Mathf.Max(vel.y, 1.8f);
-        rb.linearVelocity = vel;
-        ballSpin *= 0.5f;
 
-        TriggerImpactFeedback(hitPoint, Vector3.up, 0.04f);
+        Vector3 vel = rb.linearVelocity;
+        float travel = vel.z >= 0f ? 1f : -1f;
+        float aboveCord = transform.position.y - BallPhysics.NetTopY;
+        bool popsOver = aboveCord > cordPopHeight || (aboveCord > -cordPopHeight && Random.value < 0.5f);
+
+        if (popsOver)
+        {
+            vel.z = travel * Mathf.Clamp(Mathf.Abs(vel.z) * 0.45f, 2.5f, 5f);
+            vel.y = Mathf.Max(vel.y, 1.6f);
+        }
+        else
+        {
+            vel.z = -travel * Mathf.Abs(vel.z) * 0.12f;
+            vel.y = Mathf.Min(vel.y, 0.5f);
+            transform.position = new Vector3(transform.position.x, transform.position.y, -travel * 0.25f);
+        }
+        vel.x *= 0.6f;
+        rb.linearVelocity = vel;
+        ballSpin *= 0.3f;
+
+        if (GameManager.Instance != null) GameManager.Instance.ShowCallout("NET!");
+        if (HitStopManager.Instance != null) HitStopManager.Instance.PlayMoment(0f, 0.35f, 0.3f);
+        TriggerImpactFeedback(hitPoint, Vector3.up, 0.06f);
         if (audioSource != null && netHitSound != null) audioSource.PlayOneShot(netHitSound);
     }
 
@@ -396,12 +430,12 @@ public class BallController : MonoBehaviour
         {
             BallPhysicsParams p = PhysicsParams;
             bool landsIn = BallPhysics.SimulateToLanding(p, rb.position, rb.linearVelocity, ballSpin,
-                                                         Time.fixedDeltaTime, out Vector3 landing, out _);
+                                                         simDt, out Vector3 landing, out _);
             bool landsOnReceiverSide = receiver == Hitter.Player ? landing.z < 0f : landing.z > 0f;
             if (!landsIn || !landsOnReceiverSide)
             {
                 inPlay = false;
-                if (GameManager.Instance != null) GameManager.Instance.OnPointScored(receiver == Hitter.Player, "OUT");
+                if (GameManager.Instance != null) GameManager.Instance.OnPointScored(receiver == Hitter.Player, receiver == Hitter.Player ? "CPU hit it long" : "You hit it long");
                 return;
             }
         }
@@ -418,11 +452,11 @@ public class BallController : MonoBehaviour
 
     private void ExecutePlayerHitLogic()
     {
-        // Arcade forgiveness: only fault if ball was struck unreasonably early before crossing table
+        // Forgiving volley rule: only a ball taken well before the player's end is a fault.
         if (bouncesOnPlayerSide == 0 && transform.position.z >= -4.5f && transform.position.y > 0.40f)
         {
             inPlay = false;
-            if (GameManager.Instance != null) GameManager.Instance.OnPointScored(false, "VOLLEY FAULT");
+            if (GameManager.Instance != null) GameManager.Instance.OnPointScored(false, "Volley before the bounce");
             return;
         }
 
@@ -441,7 +475,6 @@ public class BallController : MonoBehaviour
         float power = Mathf.Clamp01(Mathf.Max(0f, paddleVel.z) / 6.0f);
         if (stroking && power < 0.35f) power = 0.45f;
 
-        // Snap ball flush against the paddle's front rubber (paddle.z + 0.19m)
         Vector3 paddlePos = playerTransform != null ? playerTransform.position : new Vector3(0f, 0.55f, -7.6f);
         Vector3 contact = new Vector3(
             Mathf.Clamp(transform.position.x, paddlePos.x - 0.48f, paddlePos.x + 0.48f),
@@ -500,15 +533,18 @@ public class BallController : MonoBehaviour
         if (callout == null && Mathf.Abs(side) > 0.5f) callout = "CURVE";
 
         Vector3 spin = new Vector3(topspin * maxSpin, side * maxSpin * 0.6f, 0f);
-        Vector3 launchVel = BallPhysics.SolveLaunch(PhysicsParams, contact, new Vector3(targetX, 0f, targetZ), apex, ref spin, Time.fixedDeltaTime);
+        Vector3 launchVel = BallPhysics.SolveLaunch(PhysicsParams, contact, new Vector3(targetX, 0f, targetZ), apex, ref spin, simDt);
         rb.linearVelocity = launchVel;
         ballSpin = spin;
 
-        if (visualFX != null) visualFX.SetSpinTint(topspin, side);
+        if (visualFX != null) visualFX.SetSpinTint(topspin);
         if (callout != null && GameManager.Instance != null) GameManager.Instance.ShowCallout(callout);
 
         TriggerImpactFeedback(contact, Vector3.back, trauma);
-        if (kill && HitStopManager.Instance != null) HitStopManager.Instance.TriggerHitStop(0.03f);
+        if (kill && HitStopManager.Instance != null) HitStopManager.Instance.PlayMoment(0.05f, 0.2f, 0.35f);
+        if (kill && CameraShake.Instance != null) CameraShake.Instance.PunchFov();
+        if (visualFX != null) visualFX.PlayHitBurst(contact, Vector3.forward, kill ? 1f : power * 0.6f);
+        if (playerCtrl != null) playerCtrl.PlayStrokeVisual(topspin, power);
         PlayHit(Mathf.Lerp(0.92f, 1.25f, power));
     }
 
@@ -577,11 +613,16 @@ public class BallController : MonoBehaviour
 
         // Travel is -z, so topspin is negative spin.x.
         Vector3 spin = new Vector3(-topspin * maxSpin, side * maxSpin * 0.6f, 0f);
-        Vector3 launchVel = BallPhysics.SolveLaunch(p, contact, new Vector3(targetX, 0f, targetZ), apex, ref spin, Time.fixedDeltaTime);
+        Vector3 launchVel = BallPhysics.SolveLaunch(p, contact, new Vector3(targetX, 0f, targetZ), apex, ref spin, simDt);
         rb.linearVelocity = launchVel;
         ballSpin = spin;
 
-        if (visualFX != null) visualFX.SetSpinTint(topspin, side);
+        if (visualFX != null)
+        {
+            visualFX.SetSpinTint(topspin);
+            visualFX.PlayHitBurst(contact, Vector3.back, trauma > 0.1f ? 1f : 0.4f);
+        }
+        if (aiCtrl != null) aiCtrl.PlayStrokeVisual(topspin);
         TriggerImpactFeedback(contact, Vector3.forward, trauma);
         PlayHit(1.0f);
     }
@@ -596,7 +637,7 @@ public class BallController : MonoBehaviour
         Vector3 spin = ballSpin;
         bool serve = isServeShot;
         int aiBounces = bouncesOnAISide;
-        float dt = Time.fixedDeltaTime;
+        float dt = simDt;
         point = pos;
         time = 0f;
         if (!inPlay || vel.z <= 0f) return false;
@@ -641,10 +682,24 @@ public class BallController : MonoBehaviour
     {
         bool isPlayerHalf = contact.point.z < 0f;
 
-        rb.linearVelocity = BallPhysics.Bounce(PhysicsParams, rb.linearVelocity, ballSpin, isServeShot);
+        Vector3 vel = BallPhysics.Bounce(PhysicsParams, rb.linearVelocity, ballSpin, isServeShot);
         ballSpin *= BallPhysics.BounceSpinRetention;
 
-        TriggerImpactFeedback(contact.point, contact.normal, 0.02f);
+        // Edge balls stay out of BallPhysics.Bounce on purpose: the AI's prediction misses them, as a player would.
+        float sideGap = BallPhysics.TableHalfWidth - Mathf.Abs(contact.point.x);
+        float endGap = BallPhysics.TableHalfLength - Mathf.Abs(contact.point.z);
+        bool edge = !isServeShot && Mathf.Min(sideGap, endGap) <= edgeBand;
+        if (edge)
+        {
+            vel.y *= 0.45f;
+            if (sideGap <= edgeBand) vel.x += Mathf.Sign(contact.point.x) * 1.4f;
+            else vel.z *= 1.1f;
+            if (GameManager.Instance != null) GameManager.Instance.ShowCallout("EDGE!");
+        }
+        rb.linearVelocity = vel;
+
+        if (visualFX != null) visualFX.MarkBounce(contact.point);
+        TriggerImpactFeedback(contact.point, contact.normal, edge ? 0.08f : 0.02f);
         if (audioSource != null && tableBounceSound != null) audioSource.PlayOneShot(tableBounceSound);
 
         if (!inPlay || GameManager.Instance == null) return;
@@ -657,14 +712,14 @@ public class BallController : MonoBehaviour
                 if (lastHitter == Hitter.Player && bouncesOnPlayerSide > 1)
                 {
                     inPlay = false;
-                    GameManager.Instance.OnPointScored(false, "SERVE DOUBLE BOUNCE");
+                    GameManager.Instance.OnPointScored(false, "Serve bounced twice on your side");
                 }
                 else if (lastHitter == Hitter.AI)
                 {
                     if (bouncesOnAISide == 0)
                     {
                         inPlay = false;
-                        GameManager.Instance.OnPointScored(true, "AI SERVE FAULT");
+                        GameManager.Instance.OnPointScored(true, "CPU serve missed its own side");
                     }
                     else if (bouncesOnPlayerSide == 1 && netTouchedOnCurrentShot)
                     {
@@ -674,7 +729,7 @@ public class BallController : MonoBehaviour
                     else if (bouncesOnPlayerSide > 1)
                     {
                         inPlay = false;
-                        GameManager.Instance.OnPointScored(false, "DOUBLE BOUNCE");
+                        GameManager.Instance.OnPointScored(false, "Bounced twice on your side");
                     }
                     else isServeShot = false;
                 }
@@ -684,12 +739,12 @@ public class BallController : MonoBehaviour
                 if (lastHitter == Hitter.Player)
                 {
                     inPlay = false;
-                    GameManager.Instance.OnPointScored(false, "HIT OWN TABLE");
+                    GameManager.Instance.OnPointScored(false, netTouchedOnCurrentShot ? "Into the net" : "Hit your own side");
                 }
                 else if (bouncesOnPlayerSide > 1)
                 {
                     inPlay = false;
-                    GameManager.Instance.OnPointScored(false, "DOUBLE BOUNCE");
+                    GameManager.Instance.OnPointScored(false, "Bounced twice on your side");
                 }
             }
         }
@@ -701,14 +756,14 @@ public class BallController : MonoBehaviour
                 if (lastHitter == Hitter.AI && bouncesOnAISide > 1)
                 {
                     inPlay = false;
-                    GameManager.Instance.OnPointScored(true, "AI SERVE DOUBLE BOUNCE");
+                    GameManager.Instance.OnPointScored(true, "CPU serve bounced twice");
                 }
                 else if (lastHitter == Hitter.Player)
                 {
                     if (bouncesOnPlayerSide == 0)
                     {
                         inPlay = false;
-                        GameManager.Instance.OnPointScored(false, "SERVE MISSED TABLE");
+                        GameManager.Instance.OnPointScored(false, "Serve has to bounce on your side first");
                     }
                     else if (bouncesOnAISide == 1 && netTouchedOnCurrentShot)
                     {
@@ -718,7 +773,7 @@ public class BallController : MonoBehaviour
                     else if (bouncesOnAISide > 1)
                     {
                         inPlay = false;
-                        GameManager.Instance.OnPointScored(true, "DOUBLE BOUNCE");
+                        GameManager.Instance.OnPointScored(true, "Bounced twice on the CPU side");
                     }
                     else isServeShot = false;
                 }
@@ -728,12 +783,12 @@ public class BallController : MonoBehaviour
                 if (lastHitter == Hitter.AI)
                 {
                     inPlay = false;
-                    GameManager.Instance.OnPointScored(true, "HIT OWN TABLE");
+                    GameManager.Instance.OnPointScored(true, netTouchedOnCurrentShot ? "CPU hit the net" : "CPU hit its own side");
                 }
                 else if (bouncesOnAISide > 1)
                 {
                     inPlay = false;
-                    GameManager.Instance.OnPointScored(true, "DOUBLE BOUNCE");
+                    GameManager.Instance.OnPointScored(true, "Bounced twice on the CPU side");
                 }
             }
         }
@@ -755,9 +810,9 @@ public class BallController : MonoBehaviour
         if (GameManager.Instance == null) return;
 
         if (lastHitter == Hitter.Player)
-            GameManager.Instance.OnPointScored(bouncesOnAISide >= 1 && transform.position.z > 0f, "NET STUCK");
+            GameManager.Instance.OnPointScored(bouncesOnAISide >= 1 && transform.position.z > 0f, "Dead ball at the net");
         else
-            GameManager.Instance.OnPointScored(!(bouncesOnPlayerSide >= 1 && transform.position.z < 0f), "NET STUCK");
+            GameManager.Instance.OnPointScored(!(bouncesOnPlayerSide >= 1 && transform.position.z < 0f), "Dead ball at the net");
     }
 
     private void HandleOutOfBoundsPoint()
@@ -767,27 +822,20 @@ public class BallController : MonoBehaviour
         if (GameManager.Instance == null) return;
 
         if (lastHitter == Hitter.Player)
-            GameManager.Instance.OnPointScored(bouncesOnAISide >= 1, "OUT");
+            GameManager.Instance.OnPointScored(bouncesOnAISide >= 1, bouncesOnAISide >= 1 ? "CPU missed it" : "Out");
         else
-            GameManager.Instance.OnPointScored(!(bouncesOnPlayerSide >= 1), "OUT");
+            GameManager.Instance.OnPointScored(!(bouncesOnPlayerSide >= 1), bouncesOnPlayerSide >= 1 ? "You missed it" : "CPU hit it out");
     }
 
     private void PlayHit(float pitch)
     {
         if (audioSource == null || paddleHitSound == null) return;
-        audioSource.pitch = pitch;
+        audioSource.pitch = pitch * (1f + 0.12f * RallyHeat());
         audioSource.PlayOneShot(paddleHitSound);
     }
 
     private void TriggerImpactFeedback(Vector3 pos, Vector3 normal, float trauma)
     {
-        if (impactSparks != null)
-        {
-            impactSparks.transform.position = pos;
-            impactSparks.transform.rotation = Quaternion.LookRotation(normal);
-            impactSparks.Play();
-        }
-
         if (visualFX != null) visualFX.PlayImpactSquash(normal, rb.linearVelocity.magnitude);
         if (CameraShake.Instance != null) CameraShake.Instance.AddTrauma(trauma);
     }

@@ -6,7 +6,7 @@ public static class PhysicsSelfCheck
     [MenuItem("Pong3D/Run Physics Self-Check")]
     public static void Run()
     {
-        // 1. Check Contact Point Velocity: V_contact = V_linear + Cross(w, offset)
+        // V_contact = V_linear + Cross(w, offset)
         Vector3 vLinear = new Vector3(0f, 2f, 10f);
         Vector3 w = new Vector3(5f, 0f, 0f);
         Vector3 offset = new Vector3(0f, 0.5f, 0f);
@@ -16,7 +16,6 @@ public static class PhysicsSelfCheck
         Debug.Assert(Mathf.Approximately(vContact.z, 12.5f), "Contact velocity Z failed");
         Debug.Assert(Mathf.Approximately(vContact.y, 2.0f), "Contact velocity Y failed");
 
-        // 2. Check Aerodynamic Lift
         Vector3 topspin = new Vector3(20f, 0f, 0f);
         Vector3 ballVel = new Vector3(0f, 1f, 12f);
         Vector3 magnusTopspin = 0.0008f * Vector3.Cross(topspin, ballVel);
@@ -26,7 +25,7 @@ public static class PhysicsSelfCheck
         Vector3 magnusBackspin = 0.0008f * Vector3.Cross(backspin, ballVel);
         Debug.Assert(magnusBackspin.y > 0f, "Magnus backspin must produce upward lift");
 
-        // 3. Player ITTF Double-Bounce Serve Verification
+        // Player serve must bounce once on each half and clear the net.
         float gEff = 9.81f * 0.38f; // 3.7278 m/s^2
         float netTopY = 0.16f;
 
@@ -35,7 +34,6 @@ public static class PhysicsSelfCheck
         float pServeStartY = 0.55f;
         float pServeStartZ = -7.41f; // paddle.z (-7.6) + 0.19m rubber surface contact
 
-        // First bounce on player table half
         float a1 = 0.5f * gEff;
         float b1 = -pServeVy;
         float c1 = -pServeStartY;
@@ -43,7 +41,6 @@ public static class PhysicsSelfCheck
         float zFirstBounce = pServeStartZ + pServeVz * tFirstBounce;
         Debug.Assert(zFirstBounce > -6.5f && zFirstBounce < -3.0f, $"Player serve must bounce on player table half: z={zFirstBounce}");
 
-        // Net clearance on rebound
         float reboundVy = 2.65f;
         float distToNet = Mathf.Abs(zFirstBounce);
         float tNet = distToNet / pServeVz;
@@ -51,12 +48,10 @@ public static class PhysicsSelfCheck
         float ballBottomAtNet = yAtNet - 0.19f;
         Debug.Assert(ballBottomAtNet > netTopY + 0.40f, $"Serve must clear net with >40cm safety: ballBottom={ballBottomAtNet}");
 
-        // Second bounce on AI table half
         float tAir = (2f * reboundVy) / gEff;
         float zSecondBounce = zFirstBounce + pServeVz * tAir;
         Debug.Assert(zSecondBounce > 3.5f && zSecondBounce < 7.8f, $"Player serve must land on opponent table half: z={zSecondBounce}");
 
-        // 4. Slow Forward Push / Block Verification
         Vector3 slowStart = new Vector3(0f, 0.55f, -7.41f);
         Vector3 slowTarget = new Vector3(0f, 0f, 4.0f);
         float slowApexY = 1.35f;
@@ -73,7 +68,6 @@ public static class PhysicsSelfCheck
         float slowZLand = slowStart.z + slowVz * slowTTotal;
         Debug.Assert(Mathf.Approximately(slowZLand, slowTarget.z), $"Slow push must land at target: zLand={slowZLand}");
 
-        // 5. Fast Forward Smash Verification
         Vector3 fastStart = new Vector3(0f, 0.55f, -7.41f);
         Vector3 fastTarget = new Vector3(0f, 0f, 6.3f);
         float fastApexY = 1.00f;
@@ -91,11 +85,10 @@ public static class PhysicsSelfCheck
         Debug.Assert(Mathf.Approximately(fastZLand, fastTarget.z), $"Fast smash must land at target: zLand={fastZLand}");
         Debug.Assert(fastVz > slowVz + 3.0f, $"Fast smash speed ({fastVz}) must be significantly faster than slow push ({slowVz})");
 
-        // 6. Spin-aware solver must agree with the live integrator: every shot type lands near
-        //    its target and clears the net, with the same Magnus model the Rigidbody uses.
+        // The spin-aware solver must agree with the live integrator for every shot type.
         BallPhysicsParams bp = new BallPhysicsParams
         {
-            gravity = gEff, magnus = 0.018f, maxSpin = 18f, spinDecay = 3.0f,
+            gravity = gEff, magnus = 0.018f, drag = 0.012f, maxSpin = 18f, spinDecay = 3.0f,
             bounceEfficiency = 0.88f, sideKick = 1.3f, radius = 0.19f, maxSpeed = 17f
         };
         float dt = 0.02f;
@@ -121,10 +114,10 @@ public static class PhysicsSelfCheck
             Debug.Assert(onTable, $"{s.name} must land on the table: {land}");
             Debug.Assert(miss < 0.5f, $"{s.name} lands {miss:F2}m from target");
             Debug.Assert(clearance > 0.05f, $"{s.name} must clear the net: {clearance:F2}m");
-            Debug.Assert(Mathf.Abs(v.z) <= bp.maxSpeed + 0.01f, $"{s.name} launch faster than maxSpeed: {v.z:F1}");
+            // maxSpeed caps the drag-free estimate; drag compensation may add up to ~15% at launch.
+            Debug.Assert(Mathf.Abs(v.z) <= bp.maxSpeed * 1.15f, $"{s.name} launch too fast to read: {v.z:F1}");
         }
 
-        // 7. Bounce reacts to spin: topspin skids lower/faster, chop checks up short and low.
         Vector3 inVel = new Vector3(0f, -3f, 10f);
         Vector3 flatOut = BallPhysics.Bounce(bp, inVel, Vector3.zero, false);
         Vector3 topOut = BallPhysics.Bounce(bp, inVel, new Vector3(18f, 0f, 0f), false);

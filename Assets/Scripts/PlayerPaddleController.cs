@@ -57,7 +57,6 @@ public class PlayerPaddleController : MonoBehaviour
     {
         if (mainCam == null) mainCam = Camera.main;
 
-        // 1. Viewport-Normalized Lateral (X) and Vertical (Y) Hand Tracking
         Vector3 pointerPos = Input.mousePosition;
         if (Input.touchCount > 0)
         {
@@ -72,7 +71,7 @@ public class PlayerPaddleController : MonoBehaviour
         targetPos.x = Mathf.Clamp(normX * maxX, minX, maxX);
         targetPos.y = Mathf.Lerp(minY, maxY, normY * 1.25f);
 
-        // 2. Dynamic Forward Swing Speed: Flick, Tap, Click, Space, or Scroll
+        // A fast upward flick, tap, click or Space starts a forward stroke; scroll nudges depth.
         float deltaY = pointerPos.y - prevPointerPos.y;
         float dt = Mathf.Max(Time.unscaledDeltaTime, 0.001f);
         Vector2 rawSwipe = (Vector2)(pointerPos - prevPointerPos) / (Screen.height * dt);
@@ -85,8 +84,9 @@ public class PlayerPaddleController : MonoBehaviour
             depthBias = Mathf.Clamp(depthBias + scroll * 0.20f, -0.20f, 0.50f);
         }
 
-        bool clickOrTap = Input.GetMouseButtonDown(0) || Input.GetKeyDown(KeyCode.Space)
-                       || (Input.touchCount > 0 && Input.GetTouch(0).phase == TouchPhase.Began);
+        bool pointerDown = Input.GetMouseButtonDown(0) || (Input.touchCount > 0 && Input.GetTouch(0).phase == TouchPhase.Began);
+        bool onHud = GameManager.Instance != null && GameManager.Instance.IsHudTap(pointerPos);
+        bool clickOrTap = (pointerDown && !onHud) || Input.GetKeyDown(KeyCode.Space);
         bool fastFlick = deltaY > 15f;
 
         if (fastFlick || clickOrTap)
@@ -117,13 +117,18 @@ public class PlayerPaddleController : MonoBehaviour
         linearVelocity = (newPos - currentPos) / dt;
         rb.MovePosition(newPos);
 
-        // Open blade angle (+ upward loft over net), banking into lateral turns
+        // Blade opens slightly at rest and banks into lateral movement.
         float tiltZ = Mathf.Clamp(-linearVelocity.x * 1.4f, -14f, 14f);
         float tiltX = (strokeTimer > 0f) ? 3f : -6f;
         Quaternion targetRot = Quaternion.Euler(tiltX, 0f, tiltZ);
         rb.MoveRotation(Quaternion.Slerp(rb.rotation, targetRot, 18f * dt));
 
         if (visuals != null) visuals.SetVelocity(linearVelocity.x);
+    }
+
+    public void PlayStrokeVisual(float topspin, float power)
+    {
+        if (visuals != null) visuals.PlayStroke(topspin >= 0f ? 22f * topspin : 30f * topspin, 0.25f * power);
     }
 
     public void SetBallTransform(Transform b)

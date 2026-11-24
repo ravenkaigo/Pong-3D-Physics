@@ -1,8 +1,7 @@
 using UnityEngine;
 
-// The AI reads the ball like a player: it reacts after a delay, predicts the intercept with the
-// ball's own physics (with a skill-based misread), re-reads after the bounce, and moves with
-// limited speed and acceleration. Wide, fast, spinny shots are therefore genuinely hard for it.
+// Reacts late, predicts with the ball's own physics plus a skill-based misread, and moves at limited speed,
+// so wide, fast or spinny shots can beat it.
 [RequireComponent(typeof(Rigidbody))]
 public class AIPaddleController : MonoBehaviour
 {
@@ -71,6 +70,12 @@ public class AIPaddleController : MonoBehaviour
             ballRb = ball.GetComponent<Rigidbody>();
             ballCtrl = ball.GetComponent<BallController>();
         }
+    }
+
+    // The AI faces -z, so closing its face over the ball is a negative angle and its punch moves toward the player.
+    public void PlayStrokeVisual(float topspin)
+    {
+        if (visuals != null) visuals.PlayStroke(topspin >= 0f ? -22f * topspin : -30f * topspin, -0.3f);
     }
 
     private void FixedUpdate()

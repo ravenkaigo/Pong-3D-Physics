@@ -7,7 +7,7 @@ using System.IO;
 [InitializeOnLoad]
 public class PongSceneBuilder : EditorWindow
 {
-    private const string AutoBuildKey = "Pong3D_HasAutoBuilt_v7";
+    private const string AutoBuildKey = "Pong3D_HasAutoBuilt_v8";
 
     static PongSceneBuilder()
     {
@@ -36,27 +36,27 @@ public class PongSceneBuilder : EditorWindow
 
         Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
-        // Assets / Materials setup
         if (!Directory.Exists("Assets/Materials")) Directory.CreateDirectory("Assets/Materials");
 
         Material matTable = CreateOrGetMat("Assets/Materials/M_TableSurface.mat", new Color(0.08f, 0.22f, 0.36f), 0.3f);
         Material matLines = CreateOrGetMat("Assets/Materials/M_TableLines.mat", new Color(0.96f, 0.96f, 0.98f), 0.1f);
         Material matLegs = CreateOrGetMat("Assets/Materials/M_TableLegs.mat", new Color(0.05f, 0.08f, 0.12f), 0.2f);
+        Material matFloor = CreateOrGetMat("Assets/Materials/M_ArenaFloor.mat", new Color(0.035f, 0.04f, 0.055f), 0.15f);
         Material matNet = CreateOrGetMat("Assets/Materials/M_Net.mat", new Color(0.92f, 0.92f, 0.92f, 0.75f), 0.1f, isTransparent: true);
 
-        // Semi-transparent rubbers so player paddle never obstructs vision of incoming ball
-        Material matRed = CreateOrGetMat("Assets/Materials/M_PaddleRed.mat", new Color(0.88f, 0.14f, 0.18f, 0.65f), 0.45f, isTransparent: true);
-        Material matBlack = CreateOrGetMat("Assets/Materials/M_PaddleBlack.mat", new Color(0.14f, 0.14f, 0.16f, 0.65f), 0.45f, isTransparent: true);
-        Material matRim = CreateOrGetMat("Assets/Materials/M_PaddleRim.mat", new Color(0.25f, 0.18f, 0.12f), 0.2f);
+        // Blade and rubbers are see-through so the player paddle never hides the incoming ball.
+        Material matRed = CreateOrGetMat("Assets/Materials/M_PaddleRed.mat", new Color(0.88f, 0.14f, 0.18f, 0.4f), 0.45f, isTransparent: true);
+        Material matBlack = CreateOrGetMat("Assets/Materials/M_PaddleBlack.mat", new Color(0.14f, 0.14f, 0.16f, 0.4f), 0.45f, isTransparent: true);
+        Material matRim = CreateOrGetMat("Assets/Materials/M_PaddleRim.mat", new Color(0.25f, 0.18f, 0.12f, 0.35f), 0.2f, isTransparent: true);
         Material matHandle = CreateOrGetMat("Assets/Materials/M_PaddleHandle.mat", new Color(0.82f, 0.65f, 0.46f), 0.1f);
 
-        // Clean matte tournament ball
+        // Emission keyword stays on (at black) so the heat glow's shader variant is kept in builds.
         Material matBall = CreateOrGetMat("Assets/Materials/M_Ball.mat", new Color(1.0f, 0.62f, 0.12f), 0.30f);
         matBall.color = new Color(1.0f, 0.62f, 0.12f);
-        matBall.DisableKeyword("_EMISSION");
+        matBall.EnableKeyword("_EMISSION");
+        matBall.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
         if (matBall.HasProperty("_EmissionColor")) matBall.SetColor("_EmissionColor", Color.black);
 
-        // Soft transparent motion trail
         Material matTrail = AssetDatabase.LoadAssetAtPath<Material>("Assets/Materials/M_BallTrail.mat");
         if (matTrail == null)
         {
@@ -70,8 +70,8 @@ public class PongSceneBuilder : EditorWindow
             matTrail.color = new Color(1.0f, 0.82f, 0.40f, 0.45f);
         }
 
-        // Physics Materials
         PhysicsMaterial tablePhysMat = AssetDatabase.LoadAssetAtPath<PhysicsMaterial>("Assets/Materials/TablePhysMat.physicsMaterial");
+        // Unity 6 refuses CreateAsset for .physicsMaterial; an in-scene material is enough since BallPhysics owns the bounce.
         if (tablePhysMat == null)
         {
             tablePhysMat = new PhysicsMaterial("TablePhysMat")
@@ -82,19 +82,39 @@ public class PongSceneBuilder : EditorWindow
                 bounceCombine = PhysicsMaterialCombine.Maximum,
                 frictionCombine = PhysicsMaterialCombine.Average
             };
-            AssetDatabase.CreateAsset(tablePhysMat, "Assets/Materials/TablePhysMat.physicsMaterial");
         }
 
-        // 1. Directional Sunlight with Soft Shadows
-        GameObject lightObj = new GameObject("Directional Light");
-        Light light = lightObj.AddComponent<Light>();
-        light.type = LightType.Directional;
-        light.intensity = 1.35f;
-        light.shadows = LightShadows.Soft;
-        light.color = new Color(1f, 0.98f, 0.92f);
-        lightObj.transform.rotation = Quaternion.Euler(46f, -30f, 0f);
+        // Night arena: one shadow-casting spot makes the table the only lit area; the fill keeps paddles readable.
+        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+        RenderSettings.ambientLight = new Color(0.05f, 0.06f, 0.09f);
 
-        // 2. Focused Elevated Perspective Camera Rig with Dynamic Lateral & Angle Tracking
+        GameObject spotObj = new GameObject("Arena_Spot");
+        Light spot = spotObj.AddComponent<Light>();
+        spot.type = LightType.Spot;
+        spot.range = 22f;
+        spot.spotAngle = 100f;
+        spot.innerSpotAngle = 70f;
+        spot.intensity = 3.2f;
+        spot.color = new Color(1f, 0.96f, 0.88f);
+        spot.shadows = LightShadows.Soft;
+        spot.shadowStrength = 0.85f;
+        spotObj.transform.SetPositionAndRotation(new Vector3(0f, 10f, -0.5f), Quaternion.Euler(90f, 0f, 0f));
+
+        GameObject fillObj = new GameObject("Arena_Fill");
+        Light fill = fillObj.AddComponent<Light>();
+        fill.type = LightType.Directional;
+        fill.intensity = 0.25f;
+        fill.color = new Color(0.65f, 0.75f, 1f);
+        fill.shadows = LightShadows.None;
+        fillObj.transform.rotation = Quaternion.Euler(30f, 0f, 0f);
+
+        GameObject floor = GameObject.CreatePrimitive(PrimitiveType.Plane);
+        floor.name = "Arena_Floor";
+        floor.transform.position = new Vector3(0f, -4.2f, 0f);
+        floor.transform.localScale = new Vector3(6f, 1f, 6f);
+        floor.GetComponent<Renderer>().sharedMaterial = matFloor;
+        Object.DestroyImmediate(floor.GetComponent<Collider>());
+
         GameObject camRig = new GameObject("Camera_Rig");
         camRig.transform.position = new Vector3(0f, 3.50f, -10.8f);
         camRig.transform.rotation = Quaternion.Euler(20f, 0f, 0f);
@@ -105,11 +125,11 @@ public class PongSceneBuilder : EditorWindow
         Camera cam = camObj.AddComponent<Camera>();
         cam.tag = "MainCamera";
         cam.fieldOfView = 60f;
-        cam.backgroundColor = new Color(0.08f, 0.10f, 0.15f);
+        cam.backgroundColor = new Color(0.02f, 0.025f, 0.04f);
         cam.clearFlags = CameraClearFlags.SolidColor;
         camObj.AddComponent<AudioListener>();
 
-        // 3. Table Tennis Table (Length = 16m, Width = 5.6m, Surface at y = 0.0f)
+        // Table is scaled up for the phone camera: 16 m x 5.6 m, surface at y = 0.
         GameObject table = new GameObject("Table_Holder");
         table.tag = "Table";
 
@@ -122,20 +142,17 @@ public class PongSceneBuilder : EditorWindow
         tableSurface.GetComponent<Renderer>().sharedMaterial = matTable;
         tableSurface.GetComponent<BoxCollider>().material = tablePhysMat;
 
-        // Visual lines
         CreateLine("Line_Center", table.transform, new Vector3(0f, 0.01f, 0f), new Vector3(0.06f, 0.02f, 16f), matLines);
         CreateLine("Line_Border_L", table.transform, new Vector3(-2.75f, 0.01f, 0f), new Vector3(0.06f, 0.02f, 16f), matLines);
         CreateLine("Line_Border_R", table.transform, new Vector3(2.75f, 0.01f, 0f), new Vector3(0.06f, 0.02f, 16f), matLines);
         CreateLine("Line_Border_Bottom", table.transform, new Vector3(0f, 0.01f, -7.95f), new Vector3(5.6f, 0.02f, 0.06f), matLines);
         CreateLine("Line_Border_Top", table.transform, new Vector3(0f, 0.01f, 7.95f), new Vector3(5.6f, 0.02f, 0.06f), matLines);
 
-        // Legs
         CreateLeg("Leg_BL", table.transform, new Vector3(-2.6f, -2.2f, -7.6f), matLegs);
         CreateLeg("Leg_BR", table.transform, new Vector3(2.6f, -2.2f, -7.6f), matLegs);
         CreateLeg("Leg_TL", table.transform, new Vector3(-2.6f, -2.2f, 7.6f), matLegs);
         CreateLeg("Leg_TR", table.transform, new Vector3(2.6f, -2.2f, 7.6f), matLegs);
 
-        // Net (Height = 0.16m, centered at z = 0, y = 0.08m)
         GameObject netObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
         netObj.name = "Table_Net";
         netObj.tag = "Net";
@@ -144,9 +161,8 @@ public class PongSceneBuilder : EditorWindow
         netObj.transform.localScale = new Vector3(5.8f, 0.16f, 0.04f);
         netObj.GetComponent<Renderer>().sharedMaterial = matNet;
         BoxCollider netCol = netObj.GetComponent<BoxCollider>();
-        netCol.isTrigger = true; // Trigger: lets balls glide over without concrete bounces
+        netCol.isTrigger = true; // BallController.HandleNetTouch decides the cord outcome.
 
-        // 4. Physical First-Person Table Tennis Racket (Player)
         GameObject player = new GameObject("Player_Paddle");
         player.tag = "Player";
         player.transform.position = new Vector3(0.50f, 0.55f, -7.6f);
@@ -162,7 +178,6 @@ public class PongSceneBuilder : EditorWindow
         playerPivot.transform.SetParent(player.transform, false);
         PaddleVisuals playerVis = playerPivot.AddComponent<PaddleVisuals>();
 
-        // Blade Rim Tape
         GameObject playerRim = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
         playerRim.name = "Model_BladeRim";
         playerRim.transform.SetParent(playerPivot.transform, false);
@@ -171,7 +186,6 @@ public class PongSceneBuilder : EditorWindow
         playerRim.GetComponent<Renderer>().sharedMaterial = matRim;
         Object.DestroyImmediate(playerRim.GetComponent<Collider>());
 
-        // Red Forehand Rubber (Semi-transparent for unobstructed ball tracking)
         GameObject playerRedFace = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
         playerRedFace.name = "Model_RedRubber";
         playerRedFace.transform.SetParent(playerPivot.transform, false);
@@ -181,7 +195,6 @@ public class PongSceneBuilder : EditorWindow
         playerRedFace.GetComponent<Renderer>().sharedMaterial = matRed;
         Object.DestroyImmediate(playerRedFace.GetComponent<Collider>());
 
-        // Black Backhand Rubber
         GameObject playerBlackFace = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
         playerBlackFace.name = "Model_BlackRubber";
         playerBlackFace.transform.SetParent(playerPivot.transform, false);
@@ -191,7 +204,6 @@ public class PongSceneBuilder : EditorWindow
         playerBlackFace.GetComponent<Renderer>().sharedMaterial = matBlack;
         Object.DestroyImmediate(playerBlackFace.GetComponent<Collider>());
 
-        // Wooden Handle
         GameObject playerHandle = GameObject.CreatePrimitive(PrimitiveType.Cube);
         playerHandle.name = "Model_RacketHandle";
         playerHandle.transform.SetParent(playerPivot.transform, false);
@@ -215,7 +227,6 @@ public class PongSceneBuilder : EditorWindow
         soCam.FindProperty("maxCamRoll").floatValue = 1.2f;
         soCam.ApplyModifiedProperties();
 
-        // 5. Authentic Table Tennis Racket (AI)
         GameObject ai = new GameObject("AI_Paddle");
         ai.tag = "AI";
         ai.transform.position = new Vector3(0f, 0.65f, 7.6f);
@@ -267,7 +278,6 @@ public class PongSceneBuilder : EditorWindow
 
         AIPaddleController aiCtrl = ai.AddComponent<AIPaddleController>();
 
-        // 6. Ball Entity
         GameObject ball = new GameObject("Ball_Entity");
         ball.tag = "Ball";
         ball.transform.position = new Vector3(0.30f, 0.55f, -7.0f);
@@ -306,17 +316,6 @@ public class PongSceneBuilder : EditorWindow
         );
         trail.colorGradient = gradient;
 
-        GameObject sparksObj = new GameObject("FX_ImpactSparks");
-        sparksObj.transform.SetParent(ball.transform, false);
-        ParticleSystem sparks = sparksObj.AddComponent<ParticleSystem>();
-        var main = sparks.main;
-        main.playOnAwake = false;
-        main.duration = 0.15f;
-        main.startLifetime = 0.14f;
-        main.startSpeed = 3f;
-        main.startSize = 0.06f;
-        sparks.GetComponent<ParticleSystemRenderer>().sharedMaterial = matTrail;
-
         SerializedObject soBallVis = new SerializedObject(ballVis);
         soBallVis.FindProperty("trail").objectReferenceValue = trail;
         soBallVis.FindProperty("meshRenderer").objectReferenceValue = ballModel.GetComponent<Renderer>();
@@ -327,9 +326,9 @@ public class PongSceneBuilder : EditorWindow
         soBall.FindProperty("playerTransform").objectReferenceValue = player.transform;
         soBall.FindProperty("aiTransform").objectReferenceValue = ai.transform;
         soBall.FindProperty("visualFX").objectReferenceValue = ballVis;
-        soBall.FindProperty("impactSparks").objectReferenceValue = sparks;
         soBall.FindProperty("serveSpeed").floatValue = 7.6f;
         soBall.FindProperty("maxSpeed").floatValue = 17.0f;
+        soBall.FindProperty("airDrag").floatValue = 0.012f;
         soBall.FindProperty("gravityScale").floatValue = 0.38f;
         soBall.FindProperty("tableBounceEfficiency").floatValue = 0.88f;
         soBall.ApplyModifiedProperties();
@@ -343,7 +342,6 @@ public class PongSceneBuilder : EditorWindow
         soAI.FindProperty("visuals").objectReferenceValue = aiVis;
         soAI.ApplyModifiedProperties();
 
-        // 7. Out-of-bounds Triggers
         GameObject triggers = new GameObject("Triggers");
 
         GameObject playerGoal = new GameObject("PlayerGoalZone");
@@ -368,7 +366,6 @@ public class PongSceneBuilder : EditorWindow
         soAGoal.FindProperty("isPlayerGoal").boolValue = false;
         soAGoal.ApplyModifiedProperties();
 
-        // 8. Managers
         GameObject managers = new GameObject("Managers");
         GameManager gm = managers.AddComponent<GameManager>();
         managers.AddComponent<HitStopManager>();
@@ -381,7 +378,6 @@ public class PongSceneBuilder : EditorWindow
         soGM.FindProperty("aiServePos").vector3Value = new Vector3(0f, 0.70f, 7.0f);
         soGM.ApplyModifiedProperties();
 
-        // Save Scene
         if (!Directory.Exists("Assets/Scenes")) Directory.CreateDirectory("Assets/Scenes");
         EditorSceneManager.SaveScene(scene, "Assets/Scenes/Main.unity");
         AssetDatabase.Refresh();
