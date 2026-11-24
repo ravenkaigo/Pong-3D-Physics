@@ -61,6 +61,23 @@ public class BallVisualFX : MonoBehaviour
         squashRoutine = StartCoroutine(SquashRoutine(normal.normalized, Mathf.Clamp01(force / 15f)));
     }
 
+    // Trail colour tells the spin: warm = topspin, cyan = chop, magenta shift = sidespin.
+    public void SetSpinTint(float topspin, float side)
+    {
+        if (trail == null) return;
+        Color top = new Color(1f, 0.55f, 0.15f);
+        Color chop = new Color(0.30f, 0.85f, 1f);
+        Color flat = new Color(1f, 0.90f, 0.55f);
+        Color c = topspin >= 0f ? Color.Lerp(flat, top, topspin) : Color.Lerp(flat, chop, -topspin);
+        c = Color.Lerp(c, new Color(1f, 0.30f, 0.85f), Mathf.Abs(side) * 0.6f);
+
+        Gradient g = new Gradient();
+        g.SetKeys(
+            new[] { new GradientColorKey(c, 0f), new GradientColorKey(c * 0.8f, 1f) },
+            new[] { new GradientAlphaKey(0.55f, 0f), new GradientAlphaKey(0f, 1f) });
+        trail.colorGradient = g;
+    }
+
     public void UpdateVelocityFX(float currentSpeed, float maxSpeed)
     {
         float ratio = Mathf.Clamp01(currentSpeed / Mathf.Max(maxSpeed, 1f));

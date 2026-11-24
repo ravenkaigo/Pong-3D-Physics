@@ -17,11 +17,9 @@ public class PlayerPaddleController : MonoBehaviour
     [SerializeField] private float strokeSpeed = 16.0f;
     [SerializeField] private float returnSpeed = 8.5f;
 
-    [Header("3. Ball Physics Parameters")]
-    [Range(0.2f, 1.0f)] [SerializeField] private float restitution = 0.90f;
-    [Range(0.1f, 1.0f)] [SerializeField] private float tangentialFriction = 0.60f;
-    [SerializeField] private float powerMultiplier = 1.20f;
-    [SerializeField] private float spinGeneration = 16f;
+    [Header("3. Swipe Reading")]
+    [Tooltip("Smoothing window (s) for the swipe velocity that decides spin at contact.")]
+    [SerializeField] private float swipeSmoothing = 0.06f;
 
     [Header("4. References")]
     [SerializeField] private PaddleVisuals visuals;
@@ -32,19 +30,16 @@ public class PlayerPaddleController : MonoBehaviour
     private Vector3 targetPos;
     private Vector3 physicalVelocity;
     private Vector3 linearVelocity;
-    private Vector3 angularVelocity;
+    private Vector2 swipeVelocity;
     private float strokeTimer = 0f;
     private float strokeIntensity = 1f;
     private float depthBias = 0f;
     private Vector3 prevPointerPos;
 
     public Vector3 CurrentVelocity => linearVelocity;
-    public Vector3 AngularVelocity => angularVelocity;
     public bool IsStrokingForward => strokeTimer > 0.02f || linearVelocity.z > 0.8f;
-    public float Restitution => restitution;
-    public float TangentialFriction => tangentialFriction;
-    public float PowerMultiplier => powerMultiplier;
-    public float SpinGeneration => spinGeneration;
+    // Pointer velocity in screen-heights per second: +y = upward flick (topspin), -y = chop, x = sidespin.
+    public Vector2 SwipeVelocity => swipeVelocity;
 
     private void Awake()
     {
@@ -64,7 +59,12 @@ public class PlayerPaddleController : MonoBehaviour
 
         // 1. Viewport-Normalized Lateral (X) and Vertical (Y) Hand Tracking
         Vector3 pointerPos = Input.mousePosition;
-        if (Input.touchCount > 0) pointerPos = Input.GetTouch(0).position;
+        if (Input.touchCount > 0)
+        {
+            pointerPos = Input.GetTouch(0).position;
+            // A new touch lands wherever the finger goes down; don't read that jump as a flick.
+            if (Input.GetTouch(0).phase == TouchPhase.Began) prevPointerPos = pointerPos;
+        }
 
         float normX = Mathf.Clamp((pointerPos.x / (float)Screen.width - 0.5f) * 2.2f, -1f, 1f);
         float normY = Mathf.Clamp01(pointerPos.y / (float)Screen.height);
@@ -74,6 +74,9 @@ public class PlayerPaddleController : MonoBehaviour
 
         // 2. Dynamic Forward Swing Speed: Flick, Tap, Click, Space, or Scroll
         float deltaY = pointerPos.y - prevPointerPos.y;
+        float dt = Mathf.Max(Time.unscaledDeltaTime, 0.001f);
+        Vector2 rawSwipe = (Vector2)(pointerPos - prevPointerPos) / (Screen.height * dt);
+        swipeVelocity = Vector2.Lerp(swipeVelocity, rawSwipe, 1f - Mathf.Exp(-dt / swipeSmoothing));
         prevPointerPos = pointerPos;
 
         float scroll = Input.mouseScrollDelta.y;
@@ -120,16 +123,7 @@ public class PlayerPaddleController : MonoBehaviour
         Quaternion targetRot = Quaternion.Euler(tiltX, 0f, tiltZ);
         rb.MoveRotation(Quaternion.Slerp(rb.rotation, targetRot, 18f * dt));
 
-        angularVelocity = new Vector3(0f, 0f, -linearVelocity.x * 0.40f);
-
         if (visuals != null) visuals.SetVelocity(linearVelocity.x);
-    }
-
-    public Vector3 GetContactVelocity(Vector3 contactPoint)
-    {
-        // ponytail: rigid contact velocity; upgrade to flexible blade dynamics if VR gloves connected.
-        Vector3 offset = contactPoint - rb.position;
-        return linearVelocity + Vector3.Cross(angularVelocity, offset);
     }
 
     public void SetBallTransform(Transform b)

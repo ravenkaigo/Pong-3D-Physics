@@ -5,23 +5,40 @@ public class BallController : MonoBehaviour
 {
     public enum Hitter { None, Player, AI }
 
-    [Header("1. Calibrated Speed & Parabolic Flight")]
+    [Header("1. Flight")]
     [SerializeField] private float serveSpeed = 7.6f;
-    [SerializeField] private float initialRallySpeed = 8.5f;
-    [SerializeField] private float maxSpeed = 15.0f;
-    [SerializeField] private float speedIncreasePerHit = 1.025f;
-    [SerializeField] private float smashMultiplier = 1.25f;
+    [SerializeField] private float maxSpeed = 17.0f;
     [SerializeField] private float gravityScale = 0.38f;
     [SerializeField] private float tableBounceEfficiency = 0.88f;
+    [SerializeField] private float ballRadius = 0.19f;
 
-    [Header("2. Aerodynamics & Spin")]
-    [SerializeField] private float magnusCoefficient = 0.0008f;
-    [SerializeField] private float spinDecayRate = 4.0f;
+    [Header("2. Spin (Magnus)")]
+    [Tooltip("Acceleration per (spin x speed). At 0.018 a full topspin drive drops ~1.6x faster than gravity alone.")]
+    [SerializeField] private float magnusStrength = 0.018f;
+    [SerializeField] private float maxSpin = 18f;
+    [SerializeField] private float spinDecayPerSecond = 3.0f;
+    [Tooltip("Lateral m/s added off the table at full sidespin.")]
+    [SerializeField] private float bounceSideKick = 1.3f;
 
-    [Header("3. Serve Setup")]
+    [Header("3. Player Shot Shaping")]
+    [Tooltip("Downward swipe speed (screen heights/s) at contact that turns the stroke into a chop.")]
+    [SerializeField] private float chopSwipeThreshold = 0.8f;
+    [Tooltip("Contact height at or above which a hard swing becomes a flat kill.")]
+    [SerializeField] private float smashKillHeight = 0.95f;
+    [Tooltip("Contact height below which a hard swing sails long.")]
+    [SerializeField] private float lowBallHeight = 0.65f;
+    [SerializeField] private float lowBallOvershoot = 3.0f;
+    [Tooltip("Rally length at which shots reach their flattest, fastest arcs.")]
+    [SerializeField] private int rallyForFullHeat = 12;
+
+    [Header("4. Reach")]
+    [SerializeField] private float playerReach = 1.15f;
+    [SerializeField] private float aiReach = 0.80f;
+
+    [Header("5. Serve Setup")]
     [SerializeField] private Vector3 servePaddleOffset = new Vector3(0.20f, 0.22f, 0.60f);
 
-    [Header("4. References")]
+    [Header("6. References")]
     [SerializeField] private Transform playerTransform;
     [SerializeField] private Transform aiTransform;
     [SerializeField] private BallVisualFX visualFX;
@@ -30,7 +47,6 @@ public class BallController : MonoBehaviour
     private Rigidbody rb;
     private PlayerPaddleController playerCtrl;
     private AIPaddleController aiCtrl;
-    private float currentForwardSpeed;
     private bool inPlay;
     private bool isAwaitingPlayerServe;
     private Vector3 hoverOrigin;
@@ -55,6 +71,21 @@ public class BallController : MonoBehaviour
     public bool HasBouncedOnPlayerSide => bouncesOnPlayerSide >= 1;
     public bool HasBouncedOnAISide => bouncesOnAISide >= 1;
     public bool IsServeShot => isServeShot;
+    public Hitter LastHitter => lastHitter;
+    public int ShotId { get; private set; }
+    public float SpinAmount01 => Mathf.Clamp01(ballSpin.magnitude / maxSpin);
+
+    public BallPhysicsParams PhysicsParams => new BallPhysicsParams
+    {
+        gravity = Mathf.Abs(Physics.gravity.y) * gravityScale,
+        magnus = magnusStrength,
+        maxSpin = maxSpin,
+        spinDecay = spinDecayPerSecond,
+        bounceEfficiency = tableBounceEfficiency,
+        sideKick = bounceSideKick,
+        radius = ballRadius,
+        maxSpeed = maxSpeed
+    };
 
     private void Awake()
     {
@@ -108,10 +139,10 @@ public class BallController : MonoBehaviour
     {
         if (visualFX != null) visualFX.UpdateVelocityFX(rb.linearVelocity.magnitude, maxSpeed);
 
-        if (inPlay && rb.linearVelocity.sqrMagnitude > 0.5f)
+        // Visible rotation follows the real spin axis so topspin, chop and curve read differently.
+        if (inPlay && ballSpin.sqrMagnitude > 0.25f)
         {
-            Vector3 spinAxis = Vector3.Cross(Vector3.up, rb.linearVelocity.normalized);
-            transform.Rotate(spinAxis, rb.linearVelocity.magnitude * 24f * Time.deltaTime, Space.World);
+            transform.Rotate(ballSpin.normalized, ballSpin.magnitude * 20f * Time.deltaTime, Space.World);
         }
 
         // 1. Player Serve Handling: Click, Tap, Space, or Forward Swing
@@ -140,35 +171,25 @@ public class BallController : MonoBehaviour
             Vector3 bPos = transform.position;
             Vector3 bVel = rb.linearVelocity;
 
-            // Player strike zone sweep: only triggers when ball is physically close in front of paddle
             if (bVel.z < 0f && playerTransform != null)
             {
                 Vector3 pPos = playerTransform.position;
-                if (bPos.z <= pPos.z + 0.45f && bPos.z >= pPos.z - 0.35f)
+                if (bPos.z <= pPos.z + 0.45f && bPos.z >= pPos.z - 0.35f
+                    && Mathf.Abs(bPos.x - pPos.x) < playerReach && Mathf.Abs(bPos.y - pPos.y) < 1.05f)
                 {
-                    float dx = Mathf.Abs(bPos.x - pPos.x);
-                    float dy = Mathf.Abs(bPos.y - pPos.y);
-                    if (dx < 1.15f && dy < 1.05f && (HasBouncedOnPlayerSide || bPos.z < -7.4f))
-                    {
-                        ExecutePlayerHitLogic(bPos);
-                        return;
-                    }
+                    HandlePaddleContact(Hitter.Player);
+                    return;
                 }
             }
 
-            // AI strike zone sweep
             if (bVel.z > 0f && aiTransform != null)
             {
                 Vector3 aPos = aiTransform.position;
-                if (bPos.z >= aPos.z - 0.45f && bPos.z <= aPos.z + 0.35f)
+                if (bPos.z >= aPos.z - 0.45f && bPos.z <= aPos.z + 0.35f
+                    && Mathf.Abs(bPos.x - aPos.x) < aiReach && Mathf.Abs(bPos.y - aPos.y) < 0.9f)
                 {
-                    float dx = Mathf.Abs(bPos.x - aPos.x);
-                    float dy = Mathf.Abs(bPos.y - aPos.y);
-                    if (dx < 1.15f && dy < 1.05f && (HasBouncedOnAISide || bPos.z > 7.4f))
-                    {
-                        ExecuteAIHitLogic(bPos);
-                        return;
-                    }
+                    HandlePaddleContact(Hitter.AI);
+                    return;
                 }
             }
         }
@@ -199,15 +220,10 @@ public class BallController : MonoBehaviour
     {
         if (!rb.isKinematic && (inPlay || !isAwaitingPlayerServe))
         {
-            Vector3 gravForce = Physics.gravity * gravityScale;
-            rb.AddForce(gravForce, ForceMode.Acceleration);
-
-            if (rb.linearVelocity.sqrMagnitude > 1.0f)
-            {
-                Vector3 magnusAccel = magnusCoefficient * Vector3.Cross(ballSpin, rb.linearVelocity);
-                rb.AddForce(magnusAccel, ForceMode.Acceleration);
-                ballSpin = Vector3.MoveTowards(ballSpin, Vector3.zero, spinDecayRate * Time.fixedDeltaTime);
-            }
+            BallPhysicsParams p = PhysicsParams;
+            Vector3 vel = rb.linearVelocity;
+            rb.AddForce(BallPhysics.Acceleration(p, vel, ballSpin), ForceMode.Acceleration);
+            ballSpin = BallPhysics.DecaySpin(p, vel, ballSpin, Time.fixedDeltaTime);
         }
     }
 
@@ -216,7 +232,6 @@ public class BallController : MonoBehaviour
         inPlay = false;
         isAwaitingPlayerServe = true;
         hoverOrigin = servePos;
-        currentForwardSpeed = initialRallySpeed;
         ballSpin = Vector3.zero;
 
         ResetShotState(Hitter.Player, isServe: true);
@@ -239,6 +254,7 @@ public class BallController : MonoBehaviour
         if (GameManager.Instance != null) GameManager.Instance.OnPlayerServed();
 
         Vector3 paddleVel = playerCtrl != null ? playerCtrl.CurrentVelocity : Vector3.zero;
+        Vector2 swipe = playerCtrl != null ? playerCtrl.SwipeVelocity : Vector2.zero;
         float forwardSpeed = Mathf.Max(0f, paddleVel.z);
         float speedFactor = Mathf.Clamp01(forwardSpeed / 5.0f);
 
@@ -254,18 +270,17 @@ public class BallController : MonoBehaviour
         }
 
         float vz = Mathf.Lerp(7.4f, 9.2f, speedFactor);
-        float vy = -1.1f; // Angles smoothly down onto player half at z = -4.5m
+        float vy = -1.1f; // Angles down onto player half at z ~ -5.7m
         float vx = Mathf.Clamp(paddleVel.x * 0.20f, -1.2f, 1.2f);
 
         rb.linearVelocity = new Vector3(vx, vy, vz);
-        ballSpin = new Vector3(Mathf.Lerp(5f, 12f, speedFactor), -paddleVel.x * 1.5f, 0f);
+        // Sideways swipe on the serve = sidespin serve that kicks off the opponent's half.
+        float side = Mathf.Clamp(swipe.x / 2.0f, -1f, 1f);
+        ballSpin = new Vector3(Mathf.Lerp(5f, 12f, speedFactor), side * maxSpin * 0.6f, 0f);
+        if (visualFX != null) visualFX.SetSpinTint(Mathf.Lerp(0.3f, 0.7f, speedFactor), side);
 
         TriggerImpactFeedback(transform.position, Vector3.back, Mathf.Lerp(0.04f, 0.12f, speedFactor));
-        if (audioSource != null && paddleHitSound != null)
-        {
-            audioSource.pitch = Mathf.Lerp(0.95f, 1.20f, speedFactor);
-            audioSource.PlayOneShot(paddleHitSound);
-        }
+        PlayHit(Mathf.Lerp(0.95f, 1.20f, speedFactor));
     }
 
     public void LaunchAIServe(Vector3 startPos, Vector3 targetDir)
@@ -273,8 +288,6 @@ public class BallController : MonoBehaviour
         isAwaitingPlayerServe = false;
         rb.isKinematic = false;
         transform.position = startPos;
-        currentForwardSpeed = initialRallySpeed;
-        ballSpin = Vector3.zero;
         inPlay = true;
         lastHitTime = Time.time;
 
@@ -285,14 +298,15 @@ public class BallController : MonoBehaviour
         float vx = Random.Range(-0.35f, 0.35f);
 
         rb.linearVelocity = new Vector3(vx, vy, vz);
-        ballSpin = new Vector3(-6f, 0f, 0f);
+
+        // Better AI mixes in sidespin serves the player has to read off the bounce.
+        float skill = aiCtrl != null ? aiCtrl.Skill : 0.5f;
+        float side = Random.value < skill * 0.7f ? Random.Range(-1f, 1f) : 0f;
+        ballSpin = new Vector3(-6f, side * maxSpin * 0.6f, 0f);
+        if (visualFX != null) visualFX.SetSpinTint(0.35f, side);
 
         TriggerImpactFeedback(startPos, Vector3.forward, 0.05f);
-        if (audioSource != null && paddleHitSound != null)
-        {
-            audioSource.pitch = 1.0f;
-            audioSource.PlayOneShot(paddleHitSound);
-        }
+        PlayHit(1.0f);
     }
 
     public void ResetBall(Vector3 resetPosition)
@@ -303,7 +317,6 @@ public class BallController : MonoBehaviour
         rb.isKinematic = false;
         rb.linearVelocity = Vector3.zero;
         transform.position = resetPosition;
-        currentForwardSpeed = initialRallySpeed;
         ResetShotState(Hitter.None, isServe: false);
     }
 
@@ -315,6 +328,7 @@ public class BallController : MonoBehaviour
         bouncesOnAISide = 0;
         netTouchedOnCurrentShot = false;
         stuckTimer = 0f;
+        ShotId++;
     }
 
     private void OnTriggerEnter(Collider other)
@@ -336,18 +350,11 @@ public class BallController : MonoBehaviour
                 ExecutePlayerServeHit();
                 return;
             }
-
-            if (Time.time - lastHitTime > 0.12f)
-            {
-                ExecutePlayerHitLogic(contact.point);
-            }
+            if (Time.time - lastHitTime > 0.12f) HandlePaddleContact(Hitter.Player);
         }
         else if (collision.gameObject.CompareTag("AI"))
         {
-            if (Time.time - lastHitTime > 0.12f)
-            {
-                ExecuteAIHitLogic(contact.point);
-            }
+            if (Time.time - lastHitTime > 0.12f) HandlePaddleContact(Hitter.AI);
         }
         else if (collision.gameObject.CompareTag("Table"))
         {
@@ -368,19 +375,49 @@ public class BallController : MonoBehaviour
     {
         netTouchedOnCurrentShot = true;
         Vector3 vel = rb.linearVelocity;
-        // Glide gently over the net cord rather than dead-stopping
+        // Glide over the net cord rather than dead-stopping
         vel.z = Mathf.Sign(vel.z) * Mathf.Max(Mathf.Abs(vel.z) * 0.85f, 4.5f);
         vel.y = Mathf.Max(vel.y, 1.8f);
         rb.linearVelocity = vel;
+        ballSpin *= 0.5f;
 
         TriggerImpactFeedback(hitPoint, Vector3.up, 0.04f);
         if (audioSource != null && netHitSound != null) audioSource.PlayOneShot(netHitSound);
     }
 
-    private void ExecutePlayerHitLogic(Vector3 contactPos)
+    // A ball that reaches a paddle without bouncing on that side first is judged by where it was going:
+    // heading off the table = the sender's error, so it is never "rescued" by the paddle standing there.
+    private void HandlePaddleContact(Hitter receiver)
     {
         if (!inPlay || isAwaitingPlayerServe) return;
 
+        bool bounced = receiver == Hitter.Player ? HasBouncedOnPlayerSide : HasBouncedOnAISide;
+        if (!bounced)
+        {
+            BallPhysicsParams p = PhysicsParams;
+            bool landsIn = BallPhysics.SimulateToLanding(p, rb.position, rb.linearVelocity, ballSpin,
+                                                         Time.fixedDeltaTime, out Vector3 landing, out _);
+            bool landsOnReceiverSide = receiver == Hitter.Player ? landing.z < 0f : landing.z > 0f;
+            if (!landsIn || !landsOnReceiverSide)
+            {
+                inPlay = false;
+                if (GameManager.Instance != null) GameManager.Instance.OnPointScored(receiver == Hitter.Player, "OUT");
+                return;
+            }
+        }
+
+        if (receiver == Hitter.Player) ExecutePlayerHitLogic();
+        else ExecuteAIHitLogic();
+    }
+
+    private float RallyHeat()
+    {
+        int rally = GameManager.Instance != null ? GameManager.Instance.CurrentRallyCount : 0;
+        return Mathf.Clamp01(rally / (float)Mathf.Max(1, rallyForFullHeat));
+    }
+
+    private void ExecutePlayerHitLogic()
+    {
         // Arcade forgiveness: only fault if ball was struck unreasonably early before crossing table
         if (bouncesOnPlayerSide == 0 && transform.position.z >= -4.5f && transform.position.y > 0.40f)
         {
@@ -389,6 +426,7 @@ public class BallController : MonoBehaviour
             return;
         }
 
+        float heat = RallyHeat();
         lastHitTime = Time.time;
         ResetShotState(Hitter.Player, isServe: false);
         if (GameManager.Instance != null) GameManager.Instance.IncrementRally();
@@ -397,125 +435,215 @@ public class BallController : MonoBehaviour
             playerCtrl = playerTransform.GetComponent<PlayerPaddleController>();
 
         Vector3 paddleVel = playerCtrl != null ? playerCtrl.CurrentVelocity : Vector3.zero;
-        float forwardSwingSpeed = Mathf.Max(0f, paddleVel.z);
+        Vector2 swipe = playerCtrl != null ? playerCtrl.SwipeVelocity : Vector2.zero;
         bool stroking = playerCtrl != null && playerCtrl.IsStrokingForward;
 
-        // Dynamic speed factor: forward fast -> smash/fast return, forward slow -> high soft arc
-        float speedFactor = Mathf.Clamp01(forwardSwingSpeed / 6.0f);
-        if (stroking && speedFactor < 0.35f) speedFactor = 0.45f;
+        float power = Mathf.Clamp01(Mathf.Max(0f, paddleVel.z) / 6.0f);
+        if (stroking && power < 0.35f) power = 0.45f;
 
-        // Visual contact alignment ("Nempel Mukul"):
-        // Snap ball position flush against paddle front rubber (paddle.z + 0.19m)
+        // Snap ball flush against the paddle's front rubber (paddle.z + 0.19m)
         Vector3 paddlePos = playerTransform != null ? playerTransform.position : new Vector3(0f, 0.55f, -7.6f);
-        Vector3 alignedPos = new Vector3(
+        Vector3 contact = new Vector3(
             Mathf.Clamp(transform.position.x, paddlePos.x - 0.48f, paddlePos.x + 0.48f),
             Mathf.Clamp(transform.position.y, paddlePos.y - 0.48f, paddlePos.y + 0.48f),
             paddlePos.z + 0.19f
         );
-        transform.position = alignedPos;
+        transform.position = contact;
 
-        // Fast swing pushes deep (z ~ 6.3m) with flatter piercing arc (apex 1.00m)
-        // Slow block drops mid-court (z ~ 4.0m) with soft lofty arc (apex 1.35m)
-        float targetZ = Mathf.Lerp(4.0f, 5.04f * smashMultiplier, speedFactor);
-        float targetApexY = Mathf.Lerp(1.35f, 1.00f, speedFactor);
+        // Swipe direction at contact decides the spin:
+        //   up / forward flick -> topspin drive, down -> chop (backspin), sideways -> curve.
+        bool chop = swipe.y < -chopSwipeThreshold;
+        float topspin = chop
+            ? -Mathf.Clamp01(0.5f + (-swipe.y - chopSwipeThreshold) / 2.0f)
+            : Mathf.Lerp(0.15f, 1.0f, power);
+        float side = Mathf.Clamp(swipe.x / 2.0f, -1f, 1f);
 
-        float paddleWidth = 1.4f;
-        float hitFactor = Mathf.Clamp((alignedPos.x - paddlePos.x) / (paddleWidth * 0.5f), -1f, 1f);
-        float targetX = Mathf.Clamp((hitFactor * 1.8f) + (paddleVel.x * 0.20f), -2.2f, 2.2f);
+        float hitFactor = Mathf.Clamp((contact.x - paddlePos.x) / 0.7f, -1f, 1f);
+        float targetX = Mathf.Clamp(hitFactor * 1.8f + paddleVel.x * 0.20f, -2.3f, 2.3f);
 
-        Vector3 launchVel = CalculateParabolicTrajectory(alignedPos, new Vector3(targetX, 0f, targetZ), targetApexY);
+        float targetZ = Mathf.Lerp(4.0f, 6.4f, power);
+        float apex = Mathf.Lerp(1.35f, 1.00f, power) - 0.15f * heat;
+        string callout = null;
+        float trauma = Mathf.Lerp(0.04f, 0.12f, power);
+        bool kill = false;
+
+        if (chop)
+        {
+            // Short, floating, low-bouncing ball that drags the opponent forward.
+            targetZ = 3.4f;
+            apex = 1.10f;
+            power = 0.2f;
+            callout = "CHOP";
+            trauma = 0.04f;
+        }
+        else if (power > 0.65f)
+        {
+            if (contact.y >= smashKillHeight)
+            {
+                // Ball met at the top of its bounce: flat, deep, heavy topspin.
+                kill = true;
+                targetZ = 6.8f;
+                apex = 0.92f - 0.07f * heat;
+                topspin = 1f;
+                callout = "SMASH!";
+                trauma = 0.2f;
+            }
+            else if (contact.y < lowBallHeight)
+            {
+                // Hard swing at a low ball has nothing to dip into: it sails long.
+                float lowness = Mathf.Clamp01((lowBallHeight - contact.y) / 0.3f);
+                float overSwing = (power - 0.65f) / 0.35f;
+                targetZ += lowness * overSwing * lowBallOvershoot;
+                if (targetZ > BallPhysics.TableHalfLength) callout = "TOO LOW!";
+            }
+        }
+        if (callout == null && Mathf.Abs(side) > 0.5f) callout = "CURVE";
+
+        Vector3 spin = new Vector3(topspin * maxSpin, side * maxSpin * 0.6f, 0f);
+        Vector3 launchVel = BallPhysics.SolveLaunch(PhysicsParams, contact, new Vector3(targetX, 0f, targetZ), apex, ref spin, Time.fixedDeltaTime);
         rb.linearVelocity = launchVel;
+        ballSpin = spin;
 
-        ballSpin = new Vector3(Mathf.Lerp(4f, 16f, speedFactor), -launchVel.x * 1.8f, 0f);
+        if (visualFX != null) visualFX.SetSpinTint(topspin, side);
+        if (callout != null && GameManager.Instance != null) GameManager.Instance.ShowCallout(callout);
 
-        float hitTrauma = Mathf.Lerp(0.04f, 0.16f, speedFactor);
-        TriggerImpactFeedback(alignedPos, Vector3.back, hitTrauma);
-
-        if (speedFactor > 0.65f && HitStopManager.Instance != null)
-        {
-            HitStopManager.Instance.TriggerHitStop(0.024f);
-        }
-
-        if (audioSource != null && paddleHitSound != null)
-        {
-            audioSource.pitch = Mathf.Lerp(0.92f, 1.25f, speedFactor);
-            audioSource.PlayOneShot(paddleHitSound);
-        }
+        TriggerImpactFeedback(contact, Vector3.back, trauma);
+        if (kill && HitStopManager.Instance != null) HitStopManager.Instance.TriggerHitStop(0.03f);
+        PlayHit(Mathf.Lerp(0.92f, 1.25f, power));
     }
 
-    private void ExecuteAIHitLogic(Vector3 contactPos)
+    private void ExecuteAIHitLogic()
     {
-        if (!inPlay || isAwaitingPlayerServe) return;
+        BallPhysicsParams p = PhysicsParams;
+        float incomingTop = BallPhysics.Topspin01(p, rb.linearVelocity, ballSpin);
+        float heat = RallyHeat();
 
         lastHitTime = Time.time;
         ResetShotState(Hitter.AI, isServe: false);
         if (GameManager.Instance != null) GameManager.Instance.IncrementRally();
 
-        currentForwardSpeed = Mathf.Clamp(currentForwardSpeed * speedIncreasePerHit, initialRallySpeed, maxSpeed);
-
-        // Target landing mid-court on Player side (z in [-5.2m, -3.5m] gives readable reaction arc)
-        float targetZ = Random.Range(-5.2f, -3.5f);
-        float targetX = Random.Range(-1.8f, 1.8f);
+        float skill = aiCtrl != null ? aiCtrl.Skill : 0.5f;
+        float pressure = Mathf.Clamp01((aiCtrl != null ? aiCtrl.Pressure : 0.3f) + 0.2f * heat);
 
         Vector3 aiPos = aiTransform != null ? aiTransform.position : new Vector3(0f, 0.65f, 7.6f);
-        Vector3 alignedPos = new Vector3(
+        Vector3 contact = new Vector3(
             Mathf.Clamp(transform.position.x, aiPos.x - 0.48f, aiPos.x + 0.48f),
             Mathf.Clamp(transform.position.y, aiPos.y - 0.48f, aiPos.y + 0.48f),
             aiPos.z - 0.19f
         );
-        transform.position = alignedPos;
+        transform.position = contact;
 
-        Vector3 launchVel = CalculateParabolicTrajectory(alignedPos, new Vector3(targetX, 0f, targetZ), 1.25f);
-        rb.linearVelocity = launchVel;
+        // Placement: a skilled AI aims away from where the player is standing.
+        float playerX = playerTransform != null ? playerTransform.position.x : 0f;
+        float targetX = Random.value < 0.35f + 0.45f * skill
+            ? -Mathf.Sign(playerX + Random.Range(-0.3f, 0.3f)) * Random.Range(0.9f, 2.1f)
+            : Random.Range(-1.8f, 1.8f);
+        float targetZ = Random.Range(-5.4f, -3.6f) - 0.6f * heat;
+        float apex = 1.25f - 0.2f * heat;
+        float topspin = Random.Range(0.3f, 0.7f);
+        float side = Random.value < 0.15f + 0.3f * skill ? Random.Range(-1f, 1f) : 0f;
+        float trauma = 0.05f;
 
-        ballSpin = new Vector3(-6f, -launchVel.x * 1.6f, 0f);
-        TriggerImpactFeedback(alignedPos, Vector3.forward, 0.05f);
-        if (audioSource != null && paddleHitSound != null)
+        if (incomingTop < -0.3f)
         {
-            audioSource.pitch = 1.0f;
-            audioSource.PlayOneShot(paddleHitSound);
+            // Has to lift a chop: loopy and slow, sits up for the player to attack.
+            apex = 1.45f;
+            topspin = 0.35f;
+            targetZ = -4.2f;
+            side = 0f;
         }
+        else if (contact.y >= smashKillHeight && Random.value < 0.25f + 0.6f * skill)
+        {
+            apex = 0.95f;
+            topspin = 1f;
+            targetZ = -6.4f;
+            trauma = 0.14f;
+            if (GameManager.Instance != null) GameManager.Instance.ShowCallout("AI SMASH");
+        }
+        else if (Random.value < 0.18f)
+        {
+            apex = 1.10f;
+            topspin = -0.8f;
+            targetZ = -3.2f;
+        }
+
+        // Errors come from pressure: fast, spinny, wide balls make the AI miss long or wide.
+        float errorChance = Mathf.Clamp01(pressure * (1.1f - skill) * 0.6f);
+        if (Random.value < errorChance)
+        {
+            if (Random.value < 0.5f) targetZ = -(BallPhysics.TableHalfLength + Random.Range(0.6f, 1.2f));
+            else targetX = Mathf.Sign(targetX) * (BallPhysics.TableHalfWidth + Random.Range(0.4f, 0.8f));
+        }
+
+        // Travel is -z, so topspin is negative spin.x.
+        Vector3 spin = new Vector3(-topspin * maxSpin, side * maxSpin * 0.6f, 0f);
+        Vector3 launchVel = BallPhysics.SolveLaunch(p, contact, new Vector3(targetX, 0f, targetZ), apex, ref spin, Time.fixedDeltaTime);
+        rb.linearVelocity = launchVel;
+        ballSpin = spin;
+
+        if (visualFX != null) visualFX.SetSpinTint(topspin, side);
+        TriggerImpactFeedback(contact, Vector3.forward, trauma);
+        PlayHit(1.0f);
     }
 
-    private Vector3 CalculateParabolicTrajectory(Vector3 start, Vector3 target, float targetApexY)
+    // Where the AI should meet the ball: after it bounces on the AI half, at a comfortable height,
+    // no further forward than forwardLimitZ. False if the ball is going out or will die before reach.
+    public bool PredictAIIntercept(float strikeZ, float forwardLimitZ, float backLimitZ, out Vector3 point, out float time)
     {
-        // Guaranteed lofty parabolic arc over net, landing precisely on table surface (y = 0)
-        float gEff = Mathf.Abs(Physics.gravity.y) * gravityScale;
-        float apexY = Mathf.Max(targetApexY, start.y + 0.15f, 0.85f);
+        BallPhysicsParams p = PhysicsParams;
+        Vector3 pos = rb.position;
+        Vector3 vel = rb.linearVelocity;
+        Vector3 spin = ballSpin;
+        bool serve = isServeShot;
+        int aiBounces = bouncesOnAISide;
+        float dt = Time.fixedDeltaTime;
+        point = pos;
+        time = 0f;
+        if (!inPlay || vel.z <= 0f) return false;
 
-        float vy = Mathf.Sqrt(2f * gEff * (apexY - start.y));
-        float tRise = vy / gEff;
-        float tFall = Mathf.Sqrt(2f * gEff * apexY) / gEff;
-        float tTotal = Mathf.Max(0.2f, tRise + tFall);
+        for (float t = 0f; t < 3f; t += dt)
+        {
+            vel += BallPhysics.Acceleration(p, vel, spin) * dt;
+            pos += vel * dt;
+            spin = BallPhysics.DecaySpin(p, vel, spin, dt);
 
-        float vz = (target.z - start.z) / tTotal;
-        float vx = (target.x - start.x) / tTotal;
-        vx = Mathf.Clamp(vx, -3.2f, 3.2f);
+            if (pos.y <= p.radius && vel.y < 0f)
+            {
+                if (!BallPhysics.IsOverTable(pos)) return false;
+                if (pos.z > 0f)
+                {
+                    aiBounces++;
+                    if (aiBounces >= 2) return false;
+                }
+                vel = BallPhysics.Bounce(p, vel, spin, serve);
+                if (pos.z > 0f) serve = false;
+                spin *= BallPhysics.BounceSpinRetention;
+                pos.y = p.radius;
+            }
 
-        return new Vector3(vx, vy, vz);
+            if (aiBounces >= 1)
+            {
+                bool comfortable = pos.z >= strikeZ && (pos.y >= 0.45f || pos.z >= backLimitZ - 0.3f);
+                bool mustTakeEarly = vel.y < 0f && pos.y < 0.40f && pos.z >= forwardLimitZ;
+                if (comfortable || mustTakeEarly)
+                {
+                    point = pos;
+                    time = t;
+                    return true;
+                }
+            }
+            if (pos.z > 10f || pos.y < -1f) return false;
+        }
+        return false;
     }
 
     private void HandleTableBounce(ContactPoint contact)
     {
         bool isPlayerHalf = contact.point.z < 0f;
 
-        Vector3 vel = rb.linearVelocity;
-        if (isServeShot)
-        {
-            // Guaranteed net clearance (center y > 0.90m at net) on serve rebound
-            vel.y = 2.65f;
-            vel.z = Mathf.Sign(vel.z) * Mathf.Clamp(Mathf.Abs(vel.z), 7.4f, 8.8f);
-        }
-        else
-        {
-            // High, energetic table rebound
-            vel.y = Mathf.Clamp(Mathf.Abs(vel.y) * tableBounceEfficiency, 2.4f, 3.2f);
-            vel.z = Mathf.Sign(vel.z) * Mathf.Clamp(Mathf.Abs(vel.z), initialRallySpeed * 0.85f, maxSpeed);
-        }
-        vel.x = Mathf.Clamp(vel.x * 0.90f + ballSpin.y * 0.015f, -2.8f, 2.8f);
-        rb.linearVelocity = vel;
+        rb.linearVelocity = BallPhysics.Bounce(PhysicsParams, rb.linearVelocity, ballSpin, isServeShot);
+        ballSpin *= BallPhysics.BounceSpinRetention;
 
-        ballSpin *= 0.55f;
         TriggerImpactFeedback(contact.point, contact.normal, 0.02f);
         if (audioSource != null && tableBounceSound != null) audioSource.PlayOneShot(tableBounceSound);
 
@@ -644,6 +772,13 @@ public class BallController : MonoBehaviour
             GameManager.Instance.OnPointScored(!(bouncesOnPlayerSide >= 1), "OUT");
     }
 
+    private void PlayHit(float pitch)
+    {
+        if (audioSource == null || paddleHitSound == null) return;
+        audioSource.pitch = pitch;
+        audioSource.PlayOneShot(paddleHitSound);
+    }
+
     private void TriggerImpactFeedback(Vector3 pos, Vector3 normal, float trauma)
     {
         if (impactSparks != null)
@@ -657,4 +792,3 @@ public class BallController : MonoBehaviour
         if (CameraShake.Instance != null) CameraShake.Instance.AddTrauma(trauma);
     }
 }
-

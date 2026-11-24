@@ -33,6 +33,8 @@ public class GameManager : MonoBehaviour
     private bool currentServerIsPlayer = true;
     private bool initialServerIsPlayer = true;
     private string statusMessage = "";
+    private string callout = "";
+    private float calloutUntil;
 
     private void Awake()
     {
@@ -65,9 +67,16 @@ public class GameManager : MonoBehaviour
         onRallyCountChanged?.Invoke(CurrentRallyCount);
 
         if (CurrentRallyCount == 5) statusMessage = "GREAT RALLY!";
-        else if (CurrentRallyCount == 10) statusMessage = "SUPER RALLY! 🔥";
-        else if (CurrentRallyCount >= 15 && CurrentRallyCount % 5 == 0) statusMessage = "INSANE RALLY! ⚡";
+        else if (CurrentRallyCount == 10) statusMessage = "SUPER RALLY!";
+        else if (CurrentRallyCount >= 15 && CurrentRallyCount % 5 == 0) statusMessage = "INSANE RALLY!";
         onStateChanged?.Invoke(statusMessage);
+    }
+
+    // Short shot label ("SMASH!", "CHOP", "CURVE") so players learn what their swipe did.
+    public void ShowCallout(string text)
+    {
+        callout = text;
+        calloutUntil = Time.unscaledTime + 0.7f;
     }
 
     public void OnServeLet()
@@ -114,7 +123,7 @@ public class GameManager : MonoBehaviour
         if (playerWonMatch || aiWonMatch)
         {
             State = GameState.GameOver;
-            statusMessage = playerWonMatch ? "VICTORY! 🏆" : "DEFEAT! TRY AGAIN";
+            statusMessage = playerWonMatch ? "VICTORY!" : "DEFEAT! TRY AGAIN";
             onStateChanged?.Invoke(statusMessage);
         }
         else
@@ -192,11 +201,19 @@ public class GameManager : MonoBehaviour
 
         if (CurrentRallyCount > 1 && State == GameState.Play)
         {
-            GUI.Label(new Rect(0, 62, w, 32), $"RALLY: {CurrentRallyCount} 🔥", subStyle);
+            GUI.Label(new Rect(0, 62, w, 32), $"RALLY: {CurrentRallyCount}", subStyle);
         }
         else if (!string.IsNullOrEmpty(statusMessage))
         {
             GUI.Label(new Rect(0, 62, w, 32), statusMessage, subStyle);
+        }
+
+        if (Time.unscaledTime < calloutUntil)
+        {
+            float t = (calloutUntil - Time.unscaledTime) / 0.7f;
+            GUIStyle calloutStyle = new GUIStyle(scoreStyle) { fontSize = Mathf.Clamp(w / 20, 28, 60) };
+            calloutStyle.normal.textColor = new Color(1f, 1f, 1f, Mathf.Clamp01(t * 2f));
+            GUI.Label(new Rect(0, Screen.height * 0.32f, w, 70), callout, calloutStyle);
         }
     }
 }

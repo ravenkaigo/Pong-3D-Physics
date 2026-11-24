@@ -329,10 +329,7 @@ public class PongSceneBuilder : EditorWindow
         soBall.FindProperty("visualFX").objectReferenceValue = ballVis;
         soBall.FindProperty("impactSparks").objectReferenceValue = sparks;
         soBall.FindProperty("serveSpeed").floatValue = 7.6f;
-        soBall.FindProperty("initialRallySpeed").floatValue = 8.5f;
-        soBall.FindProperty("maxSpeed").floatValue = 15.0f;
-        soBall.FindProperty("speedIncreasePerHit").floatValue = 1.025f;
-        soBall.FindProperty("smashMultiplier").floatValue = 1.25f;
+        soBall.FindProperty("maxSpeed").floatValue = 17.0f;
         soBall.FindProperty("gravityScale").floatValue = 0.38f;
         soBall.FindProperty("tableBounceEfficiency").floatValue = 0.88f;
         soBall.ApplyModifiedProperties();
